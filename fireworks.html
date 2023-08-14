@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>CS 418 fireworks</title>
+    <script src="math.js"></script><!-- Basic math operations -->
+    <script src="matrices.js"></script><!-- Basic matrix operations -->
+<script>
+const IlliniBlue = new Float32Array([0.075, 0.16, 0.292, 1])
+const blackBackground = new Float32Array([0,0,0,1])
+const g = 9.80665 / 100
+const eulerUpdatePosition = (p, v, t) => p.map((e, i) => e + v[i] * t)
+const eulerUpdateVelocity = (v, a, t) => v.map((e, i) => e + a[i] * t)
+const lifeSpan = 100
+const numDarkObjects = 50
+const darkObjectMultiplier = 0.15
+let startTime
+let prevTime
+let frameCount = 0
+let numBursts = 1
+/**
+ * @param x x coordinate
+ * @param y y coordinate
+ * @param z z coordinate
+ * @param v velocity
+ * @param c color
+ * Creates a point object with the given parameters
+ */
+ function createPoint(x, y, z, vx, vy, vz, m, r, c) {
+    let point =  {
+        position: [x, y, z],
+        velocity: [vx, vy, vz],
+        mass: m,
+        radius: r,
+        color: c
+    }
+    point.age = 0.0
+    point.acceleration = div(computeForce(point.mass, point.radius, point.velocity), point.mass)
+    return point
+}
+/**
+ * @param mass     the mass of the sphere
+ * @param radius   the radius of the sphre
+ * @param velocity the velocity of the sphere
+ * Returns the force vector acting on a point
+ */
+ function computeForce(mass, radius, velocity) {
+    let c = 1.0
+    // gravity
+    let gravity = [0, -1 * g * mass, 0]
+    let drag = [ c * velocity[0] * velocity[0] * (mass / radius),
+                 c * velocity[1] * velocity[1] * (mass / radius),
+                 c * velocity[2] * velocity[2] * (mass / radius)]
+    for (let i = 0; i < drag.length; i++) {
+        if (velocity[i] > 0)
+            drag[i] *= -1
+    }
+    return add(gravity, drag)
+}
+
+/**
+ * @param n  the number of vectors to generate
+ * Generates n normalized velocity vectors such that they are all directed
+ * away from eachother in a spherical shape
+ */
+function initFireworkVelocities(n) {
+    let velocities = [];
+    const goldenAngle = Math.PI * (3 - Math.sqrt(5))
+    for (let i = 0; i < n; i++) {
+        let theta = goldenAngle * i
+        let z = 1 - (2 * i) / (n - 1)
+        let radius = Math.sqrt(1 - z * z)
+
+        let x = Math.cos(theta) * radius
+        let y = Math.sin(theta) * radius
+
+        velocities.push([x, y, z])
+    }
+    return velocities
+}
+
+/**
+ * Function to control animation
+ */
+function timeStep(miliseconds) {
+    frameCount += 1
+    let seconds = miliseconds / 1000
+    if (!startTime) startTime = seconds
+    if (!prevTime) prevTime = seconds
+    let elapsedTime = seconds - startTime
+    let deltaTime = seconds - prevTime
+    prevTime = seconds 
+    if (elapsedTime >= burstTime) {
+        frameCount = 0
+        startTime = null
+        prevTime = null
+        numBursts += 1
+        burstTime = getRandomRange(0.8,1.5)
+        setupScene(100, getRandomRange(0,3), Math.random() > 0.6 ? 1 : 0)
+    }
+
+    if (numBursts >= 16) {
+        startTime = null
+        prevTime = null
+        cancelAnimationFrame(window.pending)
+        setTimeout(() => {
+            frameCount = 0
+            numBursts = 0
+            setup()
+        }, 3)
+    } 
+    else { 
+        draw(deltaTime ? deltaTime : 0.016) 
+        requestAnimationFrame(timeStep)
+        if(elapsedTime)
+            document.querySelector('#fps').innerHTML = (frameCount / elapsedTime).toFixed(0)
+    }
+}
+/*
+ * @param deltaTime the timestep
+ * computes particle positions and draws the scene
+ */
+function draw(deltaTime) {
+    gl.clearColor(...blackBackground)
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
+    gl.useProgram(program)
+    gl.depthMask(true)
+    // Render dark objects
+    gl.uniform1f(gl.getUniformLocation(program, 'pointSize'), 75.0)
+    darkObjects.forEach(d => {
+        let translate = m4translate(...d.position)
+        let m = translate
+        gl.uniform4fv(gl.getUniformLocation(program, 'color'), d.color)
+        gl.uniformMatrix4fv(gl.getUniformLocation(program, 'mv'), false, m4mult(v,m))
+        gl.uniformMatrix4fv(gl.getUniformLocation(program, 'p'), false, p)
+        gl.drawArrays(gl.POINTS, 0, 1)
+    })
+    // gl.uniform1f(gl.getUniformLocation(program, 'pointSize'), 5.0)
+    gl.depthMask(false)
+    // draw firework rocket trails
+    rocketParticles.forEach(trail => {
+        trail.rParticles.forEach(particle => {
+            particle.age = Math.min(particle.age + 0.2, lifeSpan)
+            particle.velocity = eulerUpdateVelocity(particle.velocity, particle.acceleration, deltaTime)
+            if (particle.position[1] >= trail.burstPoint && !trail.burst) {
+                particle.age = lifeSpan
+                trail.burst = true
+                createFireworkBurst(100, particle.position)
+            }
+            if (particle.position[1] >= trail.burstPoint) {
+                particle.age = lifeSpan
+            }
+            gl.uniform1f(gl.getUniformLocation(program, 'pointSize'), 20.0 - 15.0 * (particle.locationFactor))
+            particle.acceleration = div(computeForce(particle.mass, particle.radius, particle.velocity), particle.mass)
+            particle.position = eulerUpdatePosition(particle.position, particle.velocity, deltaTime)
+            const zigzagAmplitude = 0.005 
+            const zigzagFrequency = 1.5 
+            const xOffset = zigzagAmplitude * Math.sin(zigzagFrequency * Date.now() * 0.005 + (1 - particle.locationFactor) * 6)
+            const zOffset = zigzagAmplitude * Math.cos(zigzagFrequency * Date.now() * 0.005 + (1 - particle.locationFactor) * 6)
+            particle.position[0] += xOffset
+            particle.position[2] += zOffset
+            translate = m4translate(...particle.position)
+            if (1.0 - particle.age / lifeSpan <= 0)
+                particle.color[3] = 1.0 - particle.age / lifeSpan
+            else {
+                particle.color[3] = Math.random() / 1.4 > particle.locationFactor ? 1 - particle.locationFactor : 0
+            }
+            gl.uniform4fv(gl.getUniformLocation(program, 'color'), particle.color)
+            let m = translate
+            gl.uniformMatrix4fv(gl.getUniformLocation(program, 'mv'), false, m4mult(v,m))
+            gl.uniformMatrix4fv(gl.getUniformLocation(program, 'p'), false, p)
+            gl.drawArrays(gl.POINTS, 0, 1);
+        })
+    })
+    gl.uniform1f(gl.getUniformLocation(program, 'pointSize'), 25.0)
+    // // if firework trail reached destination, burst
+    rocketBurstParticles.forEach((particle, i) => {
+        particle.age = Math.min(particle.age + 0.8, lifeSpan)
+        particle.velocity = eulerUpdateVelocity(particle.velocity, particle.acceleration, deltaTime)
+        particle.acceleration = div(computeForce(particle.mass, particle.radius, particle.velocity), particle.mass)
+        particle.position = eulerUpdatePosition(particle.position, particle.velocity, deltaTime)
+        translate = m4translate(...particle.position)
+        particle.color[3] = 1 - particle.age / lifeSpan
+        gl.uniform4fv(gl.getUniformLocation(program, 'color'), particle.color)
+        let m = translate
+        gl.uniformMatrix4fv(gl.getUniformLocation(program, 'mv'), false, m4mult(v,m))
+        gl.uniformMatrix4fv(gl.getUniformLocation(program, 'p'), false, p)
+        gl.drawArrays(gl.POINTS, 0, 1)       
+    })
+
+    
+    // draw each firework particle, update positions
+    gl.uniform1f(gl.getUniformLocation(program, 'pointSize'), 15.0)
+    particles.forEach((particle, i) => {
+        particle.age = Math.min(particle.age + 0.8, lifeSpan)
+        particle.velocity = eulerUpdateVelocity(particle.velocity, particle.acceleration, deltaTime)
+        particle.acceleration = div(computeForce(particle.mass, particle.radius, particle.velocity), particle.mass)
+        particle.position = eulerUpdatePosition(particle.position, particle.velocity, deltaTime)
+        translate = m4translate(...particle.position)
+        particle.color[3] = 1.0 - particle.age / lifeSpan
+        gl.uniform4fv(gl.getUniformLocation(program, 'color'), particle.color)
+        let m = translate
+        gl.uniformMatrix4fv(gl.getUniformLocation(program, 'mv'), false, m4mult(v,m))
+        gl.uniformMatrix4fv(gl.getUniformLocation(program, 'p'), false, p)
+        gl.drawArrays(gl.POINTS, 0, 1)
+    })
+    gl.depthMask(true)
+}
+
+/**
+ * Compile, link, other option-independent setup
+ */
+ async function setup(event) {
+    window.gl = document.querySelector('canvas').getContext('webgl2',
+        // optional configuration object: see https://developer.mozilla.org/en-US/docs/Web/API/HTMLCanvasElement/getContext
+        {antialias: false, depth:true, preserveDrawingBuffer:true}
+    )
+    let vs = await fetch('vert_fireworks.glsl').then(res => res.text())
+    let fs = await fetch('frag_fireworks.glsl').then(res => res.text())
+    window.program = compileAndLinkGLSL(vs,fs)
+    gl.enable(gl.DEPTH_TEST)
+    gl.enable(gl.BLEND)
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE)
+    window.particles = []
+    window.darkObjects = []
+    window.rocketParticles = []
+    window.rocketBurstParticles = []
+    const vertexBuffer = gl.createBuffer();
+    window.v = m4view([0,0,1], [0,0,0], [0,1,0])
+    gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0.0,0.0,0.0]), gl.DYNAMIC_DRAW);
+    fillScreen()
+    window.currentParticleNum = 100
+    setupScene(currentParticleNum, getRandomRange(0,3), Math.random() > 0.8 ? 1 : 0)
+    window.burstTime = getRandomRange(0.8,1.5)
+    // generate dark objects
+    for (let d = 0; d < numDarkObjects; d++) {
+        let o = {
+            position: [getRandomArbitrary(-1.0, 1.0), 
+                       getRandomArbitrary(-1.0, 1.0), 
+                       getRandomArbitrary(-1.0, 1.0)],
+            color: new Float32Array([
+                        0,//Math.random() * darkObjectMultiplier,
+                        0,//Math.random() * darkObjectMultiplier,
+                        0,//Math.random() * darkObjectMultiplier,
+                        1.0])
+        }
+        darkObjects.push(o)
+    }
+    timeStep()
+}
+/**
+ * Generate geometry, render the scene
+ */
+function setupScene(numParticles, burstsPerScene, rocketBurstsPerScene) {
+    // generate particles
+    for (let b = 0; b < burstsPerScene; b++) {
+        let particlePosition = [getRandomArbitrary(-0.8, 0.8), 
+                                getRandomArbitrary(-0.8, 0.8), getRandomArbitrary(-0.8, 0.8)]
+
+        let c = normalize(hslToRgb(Math.random(), 1, 0.5))
+
+        let particleColor = new Float32Array([c[0], c[1], 
+                                            c[2], 1.0])
+        let multiColor = Math.random() > 0.8
+        let velocities = initFireworkVelocities(numParticles)
+        velocities = velocities.map(v => div(v, 1.5))
+        for (let i = 0; i < numParticles; i++) {
+            if (multiColor) {
+                c = normalize(hslToRgb(Math.random(), 1, 0.5))
+                particleColor = new Float32Array([c[0], c[1], 
+                                                c[2], 1.0])
+            }
+            particles.push(createPoint(
+                particlePosition[0],
+                particlePosition[1],
+                particlePosition[2],
+                velocities[i][0],
+                velocities[i][1],
+                velocities[i][2],
+                1.0,
+                Math.pow(1.0,3.0),
+                particleColor
+            ))
+        }
+    }
+
+    for (let r = 0; r < rocketBurstsPerScene; r++) {
+        let dir = Math.random() > 0.5 ? 1 : -1
+        let rParticles = createRocketParticles(
+            [
+                getRandomRange(0,0.8) * dir,
+                -1,
+                getRandomRange(-0.5,0),
+            ],
+            [
+                getRandomRange(0,0.2,) * -1 * dir,
+                2,
+                0
+            ]
+        )
+        rocketParticles.push({rParticles: rParticles, burstPoint: getRandomRange(0,0.8), burst: false})
+    }
+}
+/**
+ * Almost identical to setupScene, used for rocket burst effect
+ */
+function createFireworkBurst(numParticles, position) {
+    let particlePosition = position
+
+    let c = normalize(hslToRgb(Math.random(), 1, 0.5))
+
+    let particleColor = new Float32Array([c[0], c[1], 
+                                        c[2], 1.0])
+    let multiColor = Math.random() > 0.8
+    let velocities = initFireworkVelocities(numParticles)
+    velocities = velocities.map(v => div(v, 1.5))
+    for (let i = 0; i < numParticles; i++) {
+        if (multiColor) {
+            c = normalize(hslToRgb(Math.random(), 1, 0.5))
+            particleColor = new Float32Array([c[0], c[1], 
+                                            c[2], 1.0])
+        }
+        rocketBurstParticles.push(createPoint(
+            particlePosition[0],
+            particlePosition[1],
+            particlePosition[2],
+            velocities[i][0],
+            velocities[i][1],
+            velocities[i][2],
+            1.0,
+            Math.pow(1.0,3.0),
+            particleColor
+        ))
+    }
+}
+/*
+ * Resizes the canvas to completely fill the screen
+ */
+function fillScreen() {
+    let canvas = document.querySelector('canvas')
+    document.body.style.margin = '0'
+    canvas.style.width = '100%'
+    canvas.style.height = '100%'
+    canvas.width = canvas.clientWidth
+    canvas.height = canvas.clientHeight
+    canvas.style.width = ''
+    canvas.style.height = ''
+    if (window.gl) {
+        gl.viewport(0,0, canvas.width, canvas.height)
+        window.p = m4perspNegZ(0.01, 20, 1.5, canvas.width, canvas.height)
+    }
+}
+/**
+ * @param position  the initial rocket position
+ * @param velocity  the initial rocket velocity
+ * Given an initial rocket position and velocity, creates a particle trail
+ */
+function createRocketParticles(position, velocity) {
+    const numTrailParticles = 500
+    let rocketTrailParticles = []
+    let c = normalize(hslToRgb(getRandomRange(0.055,0.065), 1, 0.8))
+    for (let i = 0; i < numTrailParticles; i++) {
+
+        const color = [c[0], c[1], c[2], getRandomRange(0.8,1)]
+        const trailOffset = [
+            (Math.random() * 0.00005 - 0.000025) * i,
+            (Math.random() * 0.00005 - 0.000025) * i,
+            (Math.random() * 0.00000025 - 0.0000125) * i,
+        ]
+        const pos = [
+            position[0] + velocity[0] * i * 0.001 + trailOffset[0],
+            -5 + position[1] + velocity[1] * i * 0.001 + trailOffset[1],
+            position[2] + velocity[2] * i * 0.00001 + trailOffset[2],
+        ]
+
+        const rVelocity = [
+            velocity[0] + (Math.random() * 0.05 - 0.025) * 0.2,
+            velocity[1] + (Math.random() * 0.05 - 0.025) * 1.0,
+            velocity[2] + (Math.random() * 0.05 - 0.025) * 0.2, 
+        ]
+
+        const trailParticle = createPoint(pos[0], pos[1], pos[2], 
+        rVelocity[0], rVelocity[1], rVelocity[2], 0.1, 200, color)
+        trailParticle.locationFactor = 1 - ((1 - (i/numTrailParticles)) * 0 + (i/numTrailParticles) * 1)
+
+        rocketTrailParticles.push(trailParticle)
+    }
+    return rocketTrailParticles
+}
+
+window.addEventListener('load', setup)
+window.addEventListener('resize', fillScreen)
+</script>
+<script>
+/**
+ * Helper function from mozilla docs
+ */
+function getRandomInt(max) {
+  return Math.floor(Math.random() * max);
+}
+/**
+ * Helper function from mozilla docs
+ */
+function getRandomArbitrary(min, max) {
+  let value = Math.random() * (max - min) + min
+  let sign = Math.random()
+  return sign >= 0.5 ? value : -1 * value 
+}
+/**
+ * Helper function from mozilla docs
+ */
+ function getRandomRange(min, max) {
+  let value = Math.random() * (max - min) + min
+  return value 
+}
+/**
+ * Helper function to clamp numbers
+ */ 
+function clamp(x, min, max) {
+  return Math.min(Math.max(x, min), max)
+}
+
+/**
+ * takes vs and fs and compiles them and links them
+ */   
+function compileAndLinkGLSL(vs_source, fs_source) {
+    let vs = gl.createShader(gl.VERTEX_SHADER)
+    gl.shaderSource(vs, vs_source)
+    gl.compileShader(vs)
+    if (!gl.getShaderParameter(vs, gl.COMPILE_STATUS)) {
+        console.error(gl.getShaderInfoLog(vs))
+        throw Error("Vertex shader compilation failed")
+    }
+
+    let fs = gl.createShader(gl.FRAGMENT_SHADER)
+    gl.shaderSource(fs, fs_source)
+    gl.compileShader(fs)
+    if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) {
+        console.error(gl.getShaderInfoLog(fs))
+        throw Error("Fragment shader compilation failed")
+    }
+
+    let program = gl.createProgram()
+    gl.attachShader(program, vs)
+    gl.attachShader(program, fs)
+    gl.linkProgram(program)
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        console.error(gl.getProgramInfoLog(program))
+        throw Error("Linking failed")
+    }
+    return program
+}
+
+// Source: Stack overflow
+function hslToRgb(h, s, l){
+    var r, g, b;
+
+    if(s == 0){
+        r = g = b = l; // achromatic
+    }else{
+        var hue2rgb = function hue2rgb(p, q, t){
+            if(t < 0) t += 1;
+            if(t > 1) t -= 1;
+            if(t < 1/6) return p + (q - p) * 6 * t;
+            if(t < 1/2) return q;
+            if(t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+            return p;
+        }
+
+        var q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+        var p = 2 * l - q;
+        r = hue2rgb(p, q, h + 1/3);
+        g = hue2rgb(p, q, h);
+        b = hue2rgb(p, q, h - 1/3);
+    }
+
+    return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
+}
+
+</script>
+    
+<style>
+html, body {
+    margin: 0;
+    padding: 0;
+}
+
+html, body {
+    height: 100%;
+    width: 100%;
+    overflow: hidden; 
+}
+
+.display {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+}
+
+.fullscreen-canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+}
+</style>
+</head>
+<body>
+    <div id="fps" style="position: absolute; top: 10px; right: 10px; color: rgb(5, 255, 13); z-index: 1;"></div>
+    <div class="display"><canvas width="500" height="500"></canvas></div>
+</body>
+</html>
+        
+        
